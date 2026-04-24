@@ -1,10 +1,11 @@
 name: Sync Unity headers
 
 on:
-  schedule:
-    # Daily at 06:00 UTC. Unity doesn't ship on a fixed cadence; this catches
-    # new versions within a day of release.
-    - cron: '0 6 * * *'
+  # Scheduled sync paused — the current extractor copies raw Unity IL2CPP
+  # source, but we actually want curated/reformatted struct headers. Re-enable
+  # the cron once the extractor is pointed at the right source.
+  # schedule:
+  #   - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       limit:
