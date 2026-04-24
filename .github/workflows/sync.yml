@@ -9,13 +9,20 @@ on:
   workflow_dispatch:
     inputs:
       limit:
-        description: "Max versions to pull in one run"
+        description: "Max pulls per shard"
         required: false
-        default: "3"
+        default: "120"
+      shards:
+        description: "Total number of parallel shards"
+        required: false
+        default: "20"
 
 permissions:
   contents: write
 
+# The workflow-level concurrency group prevents two full `workflow_dispatch`
+# runs from overlapping, which would otherwise create 40 parallel shards all
+# pushing to main. Matrix jobs inside a single run still execute in parallel.
 concurrency:
   group: sync-unity-headers
   cancel-in-progress: false
@@ -24,12 +31,21 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     timeout-minutes: 330
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: sync
 
       - name: Free disk space
         run: |
@@ -43,47 +59,74 @@ jobs:
       - name: Build
         run: cargo build --release
 
-      - name: Report missing versions
-        run: ./target/release/unity-struct-puller missing | tee missing.txt | wc -l
-
-      - name: Sync headers (commit per pull)
+      - name: Pull and commit per version
         env:
-          LIMIT: ${{ github.event.inputs.limit || '3' }}
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ github.event.inputs.shards || '20' }}
+          LIMIT: ${{ github.event.inputs.limit || '120' }}
         run: |
           set -uo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+          echo "Resolving missing versions for shard $SHARD/$SHARDS"
+          ./target/release/unity-struct-puller missing \
+            | awk -v n="$SHARD" -v m="$SHARDS" '(NR - 1) % m == n - 1' \
+            > slice.txt
+          total=$(wc -l < slice.txt)
+          echo "shard $SHARD/$SHARDS has $total target versions (capped at $LIMIT)"
 
           pulled=0
           failed=0
           while IFS= read -r v; do
             [ -z "$v" ] && continue
             if [ "$pulled" -ge "$LIMIT" ]; then
-              echo "limit reached ($LIMIT)"
+              echo "limit $LIMIT reached"
               break
             fi
+
             echo "::group::pull $v"
+
+            # Another shard may have already committed this version since we
+            # computed the slice; skip to avoid duplicate downloads.
+            git pull --rebase --autostash origin main >/dev/null 2>&1 || true
+            if [ -d "headers/$v" ]; then
+              echo "$v already present; skipping"
+              echo "::endgroup::"
+              continue
+            fi
+
             if ./target/release/unity-struct-puller pull "$v"; then
-              git add headers/
+              git add "headers/$v" 2>/dev/null || git add headers/
               if git diff --cached --quiet; then
-                echo "no files added for $v (unexpected)"
+                echo "no files staged for $v"
               else
-                git commit -m "ci: $v"
-                # Retry push with rebase in case a parallel run just pushed.
-                if ! git push; then
-                  git pull --rebase --autostash || true
-                  git push || echo "push failed for $v, continuing"
+                git commit -m "ci: $v" --quiet
+                pushed=0
+                for attempt in 1 2 3 4 5 6 7 8; do
+                  if git push 2>/dev/null; then
+                    pushed=1
+                    break
+                  fi
+                  sleep $((RANDOM % 8 + 2))
+                  git pull --rebase --autostash origin main >/dev/null 2>&1 || true
+                done
+                if [ "$pushed" = "1" ]; then
+                  pulled=$((pulled + 1))
+                else
+                  echo "push gave up for $v after 8 attempts"
+                  failed=$((failed + 1))
                 fi
-                pulled=$((pulled + 1))
               fi
             else
-              echo "pull failed for $v, skipping"
+              echo "pull failed for $v"
               failed=$((failed + 1))
             fi
-            echo "::endgroup::"
-          done < missing.txt
 
-          echo "pulled=$pulled failed=$failed"
+            echo "::endgroup::"
+          done < slice.txt
+
+          echo "shard $SHARD/$SHARDS done: pulled=$pulled failed=$failed"
 
   test:
     runs-on: ubuntu-latest

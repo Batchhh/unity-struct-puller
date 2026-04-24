@@ -42,7 +42,27 @@ enum Cmd {
         /// Stop after this many successful pulls in one run.
         #[arg(long)]
         limit: Option<usize>,
+        /// Process only every Mth missing version, offset by N-1 (1-indexed).
+        /// Pass as `N/M`, e.g. `--shard 3/20` for the third of twenty disjoint
+        /// slices. Lets a matrix of CI jobs cover the full missing list in
+        /// parallel with zero overlap.
+        #[arg(long, value_parser = parse_shard)]
+        shard: Option<(u32, u32)>,
     },
+}
+
+fn parse_shard(s: &str) -> Result<(u32, u32), String> {
+    let (n, m) = s
+        .split_once('/')
+        .ok_or_else(|| format!("shard must be N/M, got {s:?}"))?;
+    let n: u32 = n.parse().map_err(|e| format!("bad shard numerator: {e}"))?;
+    let m: u32 = m
+        .parse()
+        .map_err(|e| format!("bad shard denominator: {e}"))?;
+    if m == 0 || n == 0 || n > m {
+        return Err(format!("invalid shard {n}/{m}: require 1 <= N <= M"));
+    }
+    Ok((n, m))
 }
 
 fn main() -> Result<()> {
@@ -74,7 +94,7 @@ fn main() -> Result<()> {
                 .ok_or_else(|| anyhow!("version {version} not in release index"))?;
             pull::pull_release(&client, &release, &cli.headers_dir)?;
         }
-        Cmd::Sync { limit } => run_sync(&client, &cli.headers_dir, limit)?,
+        Cmd::Sync { limit, shard } => run_sync(&client, &cli.headers_dir, limit, shard)?,
     }
     Ok(())
 }
@@ -83,16 +103,30 @@ fn run_sync(
     client: &reqwest::blocking::Client,
     headers_dir: &Path,
     limit: Option<usize>,
+    shard: Option<(u32, u32)>,
 ) -> Result<()> {
     let remote = releases::fetch_releases(client)?;
     let local: BTreeSet<_> = local_versions(headers_dir)?.into_iter().collect();
 
+    let missing: Vec<_> = remote
+        .into_iter()
+        .filter(|r| !local.contains(&r.version))
+        .collect();
+
+    let targets: Vec<_> = match shard {
+        Some((n, m)) => missing
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| (*i as u32) % m == n - 1)
+            .map(|(_, r)| r)
+            .collect(),
+        None => missing,
+    };
+    tracing::info!(targets = targets.len(), ?shard, "sync start");
+
     let mut pulled = 0usize;
     let mut failed = 0usize;
-    for release in remote {
-        if local.contains(&release.version) {
-            continue;
-        }
+    for release in targets {
         match pull::pull_release(client, &release, headers_dir) {
             Ok(_) => {
                 pulled += 1;
