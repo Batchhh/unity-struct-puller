@@ -44,26 +44,46 @@ jobs:
         run: cargo build --release
 
       - name: Report missing versions
-        run: ./target/release/unity-struct-puller missing | tee missing.txt
+        run: ./target/release/unity-struct-puller missing | tee missing.txt | wc -l
 
-      - name: Sync headers
+      - name: Sync headers (commit per pull)
         env:
           LIMIT: ${{ github.event.inputs.limit || '3' }}
-        run: ./target/release/unity-struct-puller sync --limit "$LIMIT"
-
-      - name: Commit & push
         run: |
-          set -euo pipefail
+          set -uo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add headers/
-          if git diff --cached --quiet; then
-            echo "No new headers to commit."
-            exit 0
-          fi
-          added=$(git diff --cached --name-only | awk -F/ '/^headers\// {print $2}' | sort -u | paste -sd ',' -)
-          git commit -m "ci: sync Unity headers ($added)"
-          git push
+
+          pulled=0
+          failed=0
+          while IFS= read -r v; do
+            [ -z "$v" ] && continue
+            if [ "$pulled" -ge "$LIMIT" ]; then
+              echo "limit reached ($LIMIT)"
+              break
+            fi
+            echo "::group::pull $v"
+            if ./target/release/unity-struct-puller pull "$v"; then
+              git add headers/
+              if git diff --cached --quiet; then
+                echo "no files added for $v (unexpected)"
+              else
+                git commit -m "ci: $v"
+                # Retry push with rebase in case a parallel run just pushed.
+                if ! git push; then
+                  git pull --rebase --autostash || true
+                  git push || echo "push failed for $v, continuing"
+                fi
+                pulled=$((pulled + 1))
+              fi
+            else
+              echo "pull failed for $v, skipping"
+              failed=$((failed + 1))
+            fi
+            echo "::endgroup::"
+          done < missing.txt
+
+          echo "pulled=$pulled failed=$failed"
 
   test:
     runs-on: ubuntu-latest
