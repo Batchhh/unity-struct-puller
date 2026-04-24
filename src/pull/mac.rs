@@ -3,14 +3,15 @@
 //! Unity's macOS editor installer is a flat `.pkg` (XAR archive) containing
 //! one or more component packages. Each component has a `Payload` file that
 //! is a gzip-compressed cpio archive of the actual installed filesystem.
-//! Parsing XAR + gzipped cpio in pure Rust is plausible but fiddly, so we
-//! shell out to tools that ship on both macOS and the Ubuntu CI image:
+//! We shell out to tools that ship cheaply on both macOS and Ubuntu CI:
 //!
-//! - `xar -xf unity.pkg -C .`  unpacks the outer flat package.
-//! - `bsdtar` or `cpio` reads each `*.pkg/Payload` as a cpio archive.
-//!
-//! We prefer `bsdtar` when present because it handles gzip-compressed cpio
-//! with a single command; otherwise we fall back to `gzip -dc | cpio`.
+//! - `bsdtar -xf unity.pkg` (from `libarchive-tools` on Linux, built-in on
+//!   macOS) handles XAR natively; we prefer this path because the legacy
+//!   Debian `xar` binary is no longer packaged on recent Ubuntu releases.
+//! - `xar -xf unity.pkg` is used as a fallback when `bsdtar` is missing
+//!   (e.g. a minimal macOS dev environment without Xcode).
+//! - Each `*.pkg/Payload` is extracted with `bsdtar` (auto-detects gzip),
+//!   falling back to `gzip -dc | cpio -idm`.
 
 use std::fs;
 use std::io::{self, Write};
@@ -23,27 +24,17 @@ use walkdir::WalkDir;
 use super::libil2cpp_header_subpath;
 
 pub fn extract(client: &reqwest::blocking::Client, url: &str, out_dir: &Path) -> Result<usize> {
-    ensure_tool("xar")?;
-
     let tmp = tempfile::tempdir().context("creating temp dir")?;
     let pkg_path = tmp.path().join("unity.pkg");
     download_to_file(client, url, &pkg_path)?;
 
     let unpack_dir = tmp.path().join("xar");
     fs::create_dir_all(&unpack_dir)?;
-    run(
-        Command::new("xar")
-            .arg("-x")
-            .arg("-C")
-            .arg(&unpack_dir)
-            .arg("-f")
-            .arg(&pkg_path),
-        "xar",
-    )?;
+    unpack_xar(&pkg_path, &unpack_dir)?;
 
     let payloads = find_payloads(&unpack_dir);
     if payloads.is_empty() {
-        bail!("no Payload files found after xar extraction of {}", url);
+        bail!("no Payload files found after unpacking {}", url);
     }
 
     let payload_dir = tmp.path().join("payload");
@@ -84,6 +75,42 @@ fn download_to_file(client: &reqwest::blocking::Client, url: &str, dest: &Path) 
         fs::File::create(dest).with_context(|| format!("creating {}", dest.display()))?;
     io::copy(&mut resp, &mut file).with_context(|| format!("writing {}", dest.display()))?;
     Ok(())
+}
+
+/// Unpack a flat-package XAR into `into`. Tries `bsdtar` first (available on
+/// Ubuntu via `libarchive-tools` and on macOS by default) and falls back to
+/// `xar` for hosts that only ship the legacy tool.
+fn unpack_xar(pkg: &Path, into: &Path) -> Result<()> {
+    if tool_exists("bsdtar") {
+        let status = Command::new("bsdtar")
+            .current_dir(into)
+            .arg("-xf")
+            .arg(pkg)
+            .status()
+            .context("spawning bsdtar for .pkg")?;
+        if status.success() {
+            return Ok(());
+        }
+    }
+    if tool_exists("xar") {
+        let status = Command::new("xar")
+            .arg("-x")
+            .arg("-C")
+            .arg(into)
+            .arg("-f")
+            .arg(pkg)
+            .status()
+            .context("spawning xar")?;
+        if status.success() {
+            return Ok(());
+        }
+        bail!("xar failed extracting {}", pkg.display());
+    }
+    let _ = writeln!(
+        io::stderr(),
+        "need `bsdtar` (libarchive-tools) or `xar` to unpack .pkg; none found on PATH",
+    );
+    bail!("no XAR-capable tool on PATH");
 }
 
 fn find_payloads(root: &Path) -> Vec<PathBuf> {
@@ -130,26 +157,6 @@ fn extract_payload(payload: &Path, into: &Path) -> Result<()> {
         bail!("cpio failed extracting {}", payload.display());
     }
     Ok(())
-}
-
-fn run(cmd: &mut Command, name: &str) -> Result<()> {
-    let status = cmd.status().with_context(|| format!("spawning {name}"))?;
-    if !status.success() {
-        bail!("{name} exited with {status}");
-    }
-    Ok(())
-}
-
-fn ensure_tool(name: &str) -> Result<()> {
-    if tool_exists(name) {
-        Ok(())
-    } else {
-        let _ = writeln!(
-            io::stderr(),
-            "required tool `{name}` not found on PATH; install it (e.g. `sudo apt install xar cpio libarchive-tools`).",
-        );
-        bail!("missing required tool: {name}");
-    }
 }
 
 fn tool_exists(name: &str) -> bool {
