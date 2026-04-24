@@ -1,7 +1,6 @@
 # unity-struct-puller
 
-Pulls Unity IL2CPP struct headers (`Il2CppType`, `Il2CppImage`, `FieldInfo`,
-`Il2CppClass`, …) from every published Unity editor release and commits them
+Pulls Unity IL2CPP struct headers from every published Unity editor release and commits them
 under `headers/<version>/`.
 
 Release enumeration uses Unity's public GraphQL endpoint
