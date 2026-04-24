@@ -1,0 +1,75 @@
+name: Sync Unity headers
+
+on:
+  schedule:
+    # Daily at 06:00 UTC. Unity doesn't ship on a fixed cadence; this catches
+    # new versions within a day of release.
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max versions to pull in one run"
+        required: false
+        default: "3"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-unity-headers
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 330
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h
+
+      - name: Install legacy archive tools
+        run: sudo apt-get update && sudo apt-get install -y xar cpio libarchive-tools
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Report missing versions
+        run: ./target/release/unity-struct-puller missing | tee missing.txt
+
+      - name: Sync headers
+        env:
+          LIMIT: ${{ github.event.inputs.limit || '3' }}
+        run: ./target/release/unity-struct-puller sync --limit "$LIMIT"
+
+      - name: Commit & push
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add headers/
+          if git diff --cached --quiet; then
+            echo "No new headers to commit."
+            exit 0
+          fi
+          added=$(git diff --cached --name-only | awk -F/ '/^headers\// {print $2}' | sort -u | paste -sd ',' -)
+          git commit -m "ci: sync Unity headers ($added)"
+          git push
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked
+      - run: cargo clippy --locked -- -D warnings
+      - run: cargo fmt --check

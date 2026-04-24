@@ -1,0 +1,29 @@
+[package]
+name = "unity-struct-puller"
+version = "0.1.0"
+edition = "2021"
+description = "Pulls Unity IL2CPP struct headers (Il2CppType, Il2CppImage, FieldInfo, ...) from Unity editor archives for every published version."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Batchhh/unity-struct-puller"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive", "env"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "rustls-tls",
+    "blocking",
+    "json",
+    "gzip",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = "0.4"
+tempfile = "3"
+walkdir = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+xz2 = { version = "0.1", features = ["static"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
