@@ -5,7 +5,7 @@ under `headers/<version>/`.
 
 Release enumeration uses Unity's public GraphQL endpoint
 (`services.unity.com/graphql`) and covers every version from **Unity 5.0.0f4**
-through current (~1500 releases). For Unity 2017.4+ the Linux `.tar.xz`
+through current. For Unity 2017.4+ the Linux `.tar.xz`
 editor archive is streamed through `xz2` + `tar` in pure Rust; for older
 versions the macOS `.pkg` is downloaded and unpacked via `bsdtar` (or `xar`),
 with each component `Payload` extracted via `bsdtar` or `gzip -dc | cpio`.
